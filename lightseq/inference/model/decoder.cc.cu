@@ -43,6 +43,7 @@ Decoder<OpType_>::Decoder(int max_batch_size, const int* p_d_padding_mask,
       _fzero(0.f),
 #ifdef INT8_MODE
       _trg_scaled_emb_clip_max(tw.get_trg_scaled_emb_clip_max()),
+      _output_ln_clip_max(tw.get_output_ln_clip_max()),
       _encode_output_project_kernel_kv_clip_max(
           tw.get_encode_output_project_kernel_kv_clip_max()),
       _dec_clip_max(tw.get_dec_clip_max()),
@@ -216,7 +217,14 @@ void Decoder<OpType_>::init_buffer(void* pbuf) {
   lightseq::cuda::CHECK_GPU_ERROR(
       cudaMalloc((int8_t**)&_int8_ffn_in_buf, (size_t)(max_batch_dim)));
   lightseq::cuda::CHECK_GPU_ERROR(
-      cudaMalloc((int32_t**)&_int32_ffn_out_buf, (size_t)(max_batch_dim)));
+      cudaMalloc((int32_t**)&_int32_ffn_out_buf,
+                 (size_t)(max_batch_dim * sizeof(int32_t))));
+  lightseq::cuda::CHECK_GPU_ERROR(
+      cudaMalloc((int8_t**)&_int8_p_d_trg_emb_wei,
+                 (size_t)(_tw._trg_vocab_size * _tw._hidden_size)));
+  launch_quantize_tensor(_p_d_trg_emb_wei[0], _int8_p_d_trg_emb_wei,
+                         _tw._trg_vocab_size * _tw._hidden_size, _quant_scale,
+                         _trg_scaled_emb_clip_max, _stream);
   _int8_p_d_dec_wei = std::vector<int8_t*>(_tw._n_dec_layer * 6);
   for (_layer_id = 0; _layer_id < _tw._n_dec_layer; _layer_id++) {
     _weight_offset = _layer_id * _tw._weight_per_dec_layer;
@@ -422,6 +430,19 @@ bool Decoder<OpType_>::run_step() {
   embedding();
   decoder_stack();
   /* --- Project hidden states to vocab logits--- */
+#ifdef INT8_MODE
+  CHECK_GPU_ERROR(cublasGemmEx(
+      _hd, CUBLAS_OP_N, CUBLAS_OP_N, _tw._trg_vocab_size, _step_token_num,
+      _tw._hidden_size, &_ione, _int8_p_d_trg_emb_wei, CUDA_R_8I,
+      _tw._trg_vocab_size, _int8_ffn_in_buf, CUDA_R_8I, _tw._hidden_size,
+      &_izero, _int32_ffn_out_buf, CUDA_R_32I, _tw._trg_vocab_size, CUDA_R_32I,
+      CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+  // TODO: fused into beam search
+  launch_dequantize_tensor(
+      _int32_ffn_out_buf, _p_d_logit_buf, _tw._trg_vocab_size * _step_token_num,
+      _quant_scale * _quant_scale,
+      _output_ln_clip_max * _trg_scaled_emb_clip_max * _logit_scaler, _stream);
+#else
   CHECK_GPU_ERROR(cublasGemmEx(
       _hd, CUBLAS_OP_N, CUBLAS_OP_N, _tw._trg_vocab_size, _step_token_num,
       _tw._hidden_size, &_logit_scaler, _p_d_trg_emb_wei[0], _AType,
@@ -429,6 +450,7 @@ bool Decoder<OpType_>::run_step() {
       //&_type_zero, _p_d_logit_buf, _CType, _tw._trg_vocab_size, _computeType,
       &_fzero, _p_d_logit_buf, _CType, _tw._trg_vocab_size, CUDA_R_32F,
       CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+#endif
 #ifdef DEBUG_RESULT
   for (int i = 0; i < _batch_size; i++) {       // batch_id
     for (int j = 0; j < _tw._beam_size; j++) {  // beam_id
@@ -503,9 +525,16 @@ void Decoder<OpType_>::decoder_stack() {
   }
 
   // last layer norm
+#ifdef INT8_MODE
+  ker_norm_layer_int8O_launcher<_DataType>(
+      _step_token_num, _tw._hidden_size, _stream, _p_d_cur_step_query,
+      _int8_ffn_in_buf, _p_d_trg_emb_wei[2], _p_d_trg_emb_wei[3],
+      _max_thread_per_block, _quant_scale, _output_ln_clip_max);
+#else
   ker_norm_layer_launcher<_DataType>(
       _step_token_num, _tw._hidden_size, _stream, _p_d_cur_step_query,
       _p_d_trg_emb_wei[2], _p_d_trg_emb_wei[3], _max_thread_per_block);
+#endif
   return;
 }
 
