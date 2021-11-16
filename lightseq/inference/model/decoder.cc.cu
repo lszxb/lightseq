@@ -216,9 +216,11 @@ void Decoder<OpType_>::init_buffer(void* pbuf) {
                       std::max(_tw._inner_size, _tw._hidden_size * 3);
   lightseq::cuda::CHECK_GPU_ERROR(
       cudaMalloc((int8_t**)&_int8_ffn_in_buf, (size_t)(max_batch_dim)));
-  lightseq::cuda::CHECK_GPU_ERROR(
-      cudaMalloc((int32_t**)&_int32_ffn_out_buf,
-                 (size_t)(max_batch_dim * sizeof(int32_t))));
+  lightseq::cuda::CHECK_GPU_ERROR(cudaMalloc(
+      (int32_t**)&_int32_ffn_out_buf,
+      (size_t)(std::max(max_batch_dim, _tw._trg_vocab_size * _tw._beam_size *
+                                           _max_batch_size) *
+               sizeof(int32_t))));
   lightseq::cuda::CHECK_GPU_ERROR(
       cudaMalloc((int8_t**)&_int8_p_d_trg_emb_wei,
                  (size_t)(_tw._trg_vocab_size * _tw._hidden_size)));
