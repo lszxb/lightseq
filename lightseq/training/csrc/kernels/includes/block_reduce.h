@@ -9,8 +9,10 @@
 
 enum class ReduceType { kMax = 0, kSum };
 const unsigned int WARP_REDUCE_MASK = 0xffffffff;
-const float REDUCE_FLOAT_INF_NEG = -100000000.f;
-const float REDUCE_FLOAT_INF_POS = 100000000.f;
+// const float REDUCE_FLOAT_INF_NEG = -100000000.f;
+// const float REDUCE_FLOAT_INF_POS = 100000000.f;
+#define REDUCE_FLOAT_INF_NEG -100000000.f
+#define REDUCE_FLOAT_INF_POS 100000000.f
 const unsigned int WARP_REDUCE_SIZE = 32;
 
 template <typename T>

@@ -9,7 +9,8 @@
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
-const float EPSILON = 1e-8f;
+// const float EPSILON = 1e-8f;
+#define EPSILON 1e-8f
 
 /**
 @brief: softmax_kernel

@@ -10,6 +10,8 @@
 #define MAX_THREADS 1024
 #define WARP_SIZE 32
 
+typedef unsigned int uint;
+
 enum class ActivationType { kRelu, kGelu };
 
 void launch_curand_init(int total_count, int dim, cudaStream_t stream);

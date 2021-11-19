@@ -117,12 +117,12 @@ void cuda_free(void *pdata) {
 }
 
 template <typename T>
-struct _isnan {
+struct _isnan_cuda {
   __device__ bool operator()(T a) const { return isnan(a); }
 };
 
 template <>
-struct _isnan<__half> {
+struct _isnan_cuda<__half> {
   __device__ bool operator()(const __half a) const { return __hisnan(a); }
 };
 
@@ -146,7 +146,7 @@ void check_nan_inf(const T *data_ptr, int dsize, bool check_nan_inf,
   if (check_nan_inf) {
     msg += "nan.";
     res = thrust::transform_reduce(thrust::cuda::par.on(stream), data_ptr,
-                                   data_ptr + dsize, _isnan<T>(), false,
+                                   data_ptr + dsize, _isnan_cuda<T>(), false,
                                    thrust::logical_or<bool>());
   } else {
     msg += "inf.";

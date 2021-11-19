@@ -40,7 +40,7 @@ class KernelBuilder(CUDAOpBuilder):
         args = [
             "-O3",
             "--use_fast_math",
-            "-std=c++14",
+            "-std=c++17",
             "-U__CUDA_NO_HALF_OPERATORS__",
             "-U__CUDA_NO_HALF_CONVERSIONS__",
             "-U__CUDA_NO_HALF2_OPERATORS__",
@@ -50,4 +50,4 @@ class KernelBuilder(CUDAOpBuilder):
         return args + self.compute_capability_args()
 
     def cxx_args(self):
-        return ["-O3", "-std=c++14", "-g", "-Wno-reorder"]
+        return ["-O3", "-std=c++17"]

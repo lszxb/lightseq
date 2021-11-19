@@ -218,7 +218,7 @@ class OpBuilder(ABC):
             assert_no_cuda_mismatch()
 
         self.jit_mode = True
-        from torch.utils.cpp_extension import load
+        from torch.utils.cpp_extension import load, _join_cuda_home
 
         # Ensure directory exists to prevent race condition in some cases
         ext_path = os.path.join(
@@ -236,6 +236,8 @@ class OpBuilder(ABC):
             ],
             extra_cflags=self.cxx_args(),
             extra_cuda_cflags=self.nvcc_args(),
+            # link cublas
+            extra_ldflags=[f'/LIBPATH:{_join_cuda_home("lib/x64")}', 'cublas.lib'],
             verbose=verbose,
         )
         build_duration = time.time() - start_build

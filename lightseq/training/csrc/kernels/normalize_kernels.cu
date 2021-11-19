@@ -4,7 +4,8 @@
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
-const float LN_EPSILON = 1e-8f;
+// const float LN_EPSILON = 1e-8f;
+#define LN_EPSILON 1e-8f
 #define TILE_DIM 32
 
 template <typename T>
