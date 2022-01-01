@@ -1,6 +1,3 @@
-#include <unistd.h>
-
-#include "3rdparty/cub/cub/cub.cuh"
 #include "decoder.h"
 #include "../kernels/transformerKernels.h"
 #include "../kernels/embKernels.h"
@@ -229,9 +226,6 @@ std::string Decoder<OpType_>::check() {
   }
   if (_p_d_dec_wei.size() != _tw._weight_per_dec_layer * _tw._n_dec_layer) {
     return "violate p_d_dec_wei.size() = weight_per_dec_layer * n_dec_layer";
-  }
-  if (_output_topk && _tw._length_penalty < 0) {
-    return "not support length_penlty < 0 for generate topk currently !";
   }
   bool btmp = false;
   for (int i = 1; i < 64; i *= 2) {
