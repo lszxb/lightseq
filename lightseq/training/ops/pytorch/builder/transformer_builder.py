@@ -51,6 +51,7 @@ class TransformerBuilder(CUDAOpBuilder):
             "-U__CUDA_NO_HALF_CONVERSIONS__",
             "-U__CUDA_NO_HALF2_OPERATORS__",
             "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
+            '-allow-unsupported-compiler',
         ]
 
         return args + self.compute_capability_args()
