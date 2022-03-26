@@ -4,7 +4,7 @@ Refer to the `examples/training/fairseq` directory for more training details.
 """
 import torch
 import h5py
-from proto.transformer_pb2 import Transformer
+# from proto.transformer_pb2 import Transformer
 from lightseq.training import (
     export_ls_config,
     export_ls_embedding,
@@ -81,12 +81,16 @@ def export_ls_fs_transformer(ckpt_path, out_path, save_pb=True):
     export_ls_config(
         file,
         args.encoder_attention_heads,
+        1,
         2,
         2,
-        6,
         args.encoder_layers,
         args.decoder_layers,
+        is_post_ln=True,
         save_pb=save_pb,
+        beam_size=1,
+        length_penalty=1.0,
+        topk=4
     )
 
     if save_pb:
@@ -97,17 +101,19 @@ def export_ls_fs_transformer(ckpt_path, out_path, save_pb=True):
 
 
 if __name__ == "__main__":
-    ckpt_path = "checkpoints/checkpoint_best.pt"
-    pb_path = "checkpoints/transformer.pb"
-    hdf5_path = "checkpoints/transformer.hdf5"
-    print("export to pb model >>>>>>")
-    export_ls_fs_transformer(ckpt_path, pb_path)
+    ckpt_path = "/mnt/E/NLP/model/scratch_fairseq_novel_reverse_20220302/checkpoint_best.pt"
+    # pb_path = "checkpoints/transformer.pb"
+    hdf5_path = "transformer.hdf5"
+    # print("export to pb model >>>>>>")
+    # export_ls_fs_transformer(ckpt_path, pb_path)
     print("export to hdf5 model >>>>>>")
     export_ls_fs_transformer(ckpt_path, hdf5_path, save_pb=False)
-    src = [[63, 47, 65, 1507, 88, 74, 10, 2057, 362, 9, 284, 6, 2]]
-    pb_model = lsi.Transformer(pb_path, 8)
-    pb_output = pb_model.infer(src)
+    src = [[21, 5]]
+    # src = [[463, 10184, 120, 4, 2]]
+    # src = [[63, 47, 65, 1507, 88, 74, 10, 2057, 362, 9, 284, 6, 2]]
+    # pb_model = lsi.Transformer(pb_path, 8)
+    # pb_output = pb_model.infer(src)
     hdf5_model = lsi.Transformer(hdf5_path, 8)
     hdf5_output = hdf5_model.infer(src)
-    print("pb results:", pb_output)
+    # print("pb results:", pb_output)
     print("hdf5 results:", hdf5_output)
