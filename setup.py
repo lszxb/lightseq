@@ -14,7 +14,7 @@ from distutils.version import LooseVersion
 from lightseq import __version__
 
 logging.basicConfig()
-logger = logging.getLogger(__file__)
+logger = logging.getLogger(__name__)
 
 ENABLE_FP32 = int(os.environ.get("ENABLE_FP32", 0))
 ENABLE_DEBUG = int(os.environ.get("ENABLE_DEBUG", 0))
@@ -72,6 +72,7 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
             cmake_args += ["-DFP16_MODE=OFF"] if ENABLE_FP32 else ["-DFP16_MODE=ON"]
             cmake_args += ["-DDEBUG_MODE=ON"] if ENABLE_DEBUG else ["-DDEBUG_MODE=OFF"]
+            cmake_args += ["-DDYNAMIC_API=OFF"]
             build_args += ["--target", "lightseq"]
             build_args += ["--", "-j{}".format(multiprocessing.cpu_count())]
 
@@ -112,7 +113,11 @@ setup_kwargs = dict(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: POSIX :: Linux",
     ],
-    install_requires=["ninja"],
+    install_requires=[
+        "ninja",
+        "numpy",
+        "scipy",
+    ],
     python_requires=">=3.6",
     cmdclass=dict(build_ext=CMakeBuild),
     zip_safe=False,
@@ -128,6 +133,7 @@ setup_kwargs = dict(
             "lightseq_fairseq_validate_cli:ls_cli_main",
             "lightseq-deepspeed = lightseq.training.cli."
             "lightseq_deepspeed_cli:ls_cli_main",
+            "lightseq-infer = lightseq.training.cli.lightseq_infer_cli:ls_cli_main",
         ],
     },
 )

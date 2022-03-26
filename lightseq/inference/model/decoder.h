@@ -6,6 +6,7 @@
 #include <curand_kernel.h>
 #include <thrust/functional.h>
 #include <thrust/sequence.h>
+#include <cublasLt.h>
 
 #include <algorithm>
 #include <chrono>
@@ -59,10 +60,8 @@ class Decoder {
 
   const int* _p_d_padding_mask;
   const _DataType* _p_d_encoder_output;
-  int* _p_d_result;
   int* _p_d_sample_unfinished;
   curandState* _p_d_curandstate;  //[batch_size]
-  const int* _p_d_lang_id;        // source token id
 
   std::vector<float> _h_alive_seq_probs;
   std::vector<float> _h_length_norm;
@@ -115,8 +114,10 @@ class Decoder {
   const std::vector<const _DataType*>& _p_d_trg_emb_wei;  // size: 7
   const std::vector<const _DataType*>&
       _p_d_dec_wei;  // size: 18 * dec_layer_num
+
   const _DataType _type_one;
   const _DataType _type_zero;
+
   const float _fzero;
   const _DataType
       _atten_scaler;          // scaling factor of Scaled Dot-Product Attention
@@ -124,6 +125,8 @@ class Decoder {
                               // after decoder
   const long _layer_size_encdec_k;
   const long _layer_size_self_k;
+  const std::set<std::string> kSamplingMethods = {"beam_search", "topk", "topp",
+                                                  "topk_greedy"};
 
  public:
   Decoder(int max_batch_size, const int* p_d_padding_mask,
@@ -138,6 +141,8 @@ class Decoder {
   int _cur_step;
   float* _p_d_alive_seq_score;
   bool _output_topk;
+  int* _p_d_result;
+  const int* _p_d_lang_id;
 };
 
 }  // namespace cuda

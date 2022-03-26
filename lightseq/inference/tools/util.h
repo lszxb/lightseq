@@ -14,6 +14,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
+
 #include "hdf5.h"
 
 /**
@@ -25,11 +26,12 @@ namespace lightseq {
 namespace cuda {
 
 /* GPU function guard */
-static const char* _cudaGetErrorString(cudaError_t error) {
-  return cudaGetErrorString(error);
+static std::string _cudaGetErrorString(cudaError_t error) {
+  return std::string(cudaGetErrorName(error)) +
+         std::string(cudaGetErrorString(error));
 }
 
-static const char* _cudaGetErrorString(cublasStatus_t error) {
+static std::string _cudaGetErrorString(cublasStatus_t error) {
   switch (error) {
     case CUBLAS_STATUS_SUCCESS:
       return "CUBLAS_STATUS_SUCCESS";
@@ -213,6 +215,15 @@ class HDF5DatasetNotFoundError : public std::runtime_error {
  public:
   HDF5DatasetNotFoundError(const char* what) : runtime_error(what) {}
 };
+
+template <typename T>
+T* to_gpu(const T* host_pointer, int size, cudaStream_t stream) {
+  T* gpu_pointer;
+  CHECK_GPU_ERROR(cudaMalloc(&gpu_pointer, size * sizeof(T)));
+  CHECK_GPU_ERROR(cudaMemcpyAsync(gpu_pointer, host_pointer, size * sizeof(T),
+                                  cudaMemcpyHostToDevice, stream));
+  return gpu_pointer;
+}
 
 }  // namespace cuda
 }  // namespace lightseq
