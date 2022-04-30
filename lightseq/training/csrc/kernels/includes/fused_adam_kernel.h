@@ -3,7 +3,9 @@
    This apex_adam_cuda_kernel is adapted from NVIDIA/apex
 */
 #include <ATen/ATen.h>
+#ifndef ABCDEFG
 #include <torch/extension.h>
+#endif
 
 #define DISPATCH_FLOAT_AND_HALF(TYPE, LEVEL, NAME, ...)               \
   switch (TYPE) {                                                     \
