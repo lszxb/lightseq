@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 from fairseq import metrics, utils
@@ -24,6 +25,10 @@ class LabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
         metadata={"help": "Ignore first N tokens"},
     )
     sentence_avg: bool = II("optimization.sentence_avg")
+    max_tokens: Optional[int] = II("dataset.max_tokens")
+    fp16: bool = II("common.fp16")
+    device_id: int = II("distributed_training.device_id")
+
 
 
 @register_criterion(
@@ -36,6 +41,9 @@ class LSLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         task,
         sentence_avg,
         label_smoothing,
+        max_tokens,
+        fp16,
+        device_id,
         ignore_prefix_size=0,
         # report_accuracy=False,
     ):
@@ -45,11 +53,11 @@ class LSLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         self.ignore_prefix_size = ignore_prefix_size
         # self.report_accuracy = report_accuracy
         config = LSCrossEntropyLayer.get_config(
-            max_batch_tokens=task.args.max_tokens,
+            max_batch_tokens=max_tokens,
             padding_idx=self.padding_idx,
             epsilon=label_smoothing,
-            fp16=task.args.fp16,
-            local_rank=task.args.device_id,
+            fp16=fp16,
+            local_rank=device_id,
         )
         self.ls_cross_entropy = LSCrossEntropyLayer(config)
 

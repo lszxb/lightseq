@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.optim
 from fairseq.dataclass import FairseqDataclass
-from fairseq.optim import FairseqOptimizer, register_optimizer
+from fairseq.optim import LegacyFairseqOptimizer, register_optimizer
 from omegaconf import II
 from lightseq.training.ops.pytorch.adam import LSAdam
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class LSFSAdamConfig(FairseqDataclass):
     adam_betas: str = field(
-        default=(0.9, 0.999), metadata={"help": "betas for Adam optimizer"}
+        default="(0.9, 0.999)", metadata={"help": "betas for Adam optimizer"}
     )
     adam_eps: float = field(
         default=1e-8, metadata={"help": "epsilon for Adam optimizer"}
@@ -32,7 +32,7 @@ class LSFSAdamConfig(FairseqDataclass):
 
 
 @register_optimizer("ls_adam", dataclass=LSFSAdamConfig)
-class LSFSAdam(FairseqOptimizer):
+class LSFSAdam(LegacyFairseqOptimizer):
     """Adam optimizer for fairseq.
 
     Important note: this optimizer corresponds to the "AdamW" variant of
