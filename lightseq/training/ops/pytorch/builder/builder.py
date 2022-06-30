@@ -3,6 +3,7 @@
 # This builder is adapted from Microsoft DeepSpeed
 
 import os
+import platform
 import time
 import torch
 import importlib
@@ -227,6 +228,8 @@ class OpBuilder(ABC):
         )
         os.makedirs(ext_path, exist_ok=True)
 
+
+        import platform
         start_build = time.time()
         op_module = load(
             name=self.name,
@@ -237,7 +240,7 @@ class OpBuilder(ABC):
             extra_cflags=self.cxx_args(),
             extra_cuda_cflags=self.nvcc_args(),
             # link cublas
-            extra_ldflags=[f'/LIBPATH:{_join_cuda_home("lib/x64")}', 'cublas.lib'],
+            extra_ldflags=[f'/LIBPATH:{_join_cuda_home("lib/x64")}', 'cublas.lib'] if platform.system() == 'Windows' else None,
             verbose=verbose,
         )
         build_duration = time.time() - start_build
