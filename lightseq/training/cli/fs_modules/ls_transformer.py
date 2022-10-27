@@ -11,14 +11,14 @@ from fairseq.models import (
 from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq.modules import LayerNorm
 
+from lightseq.training.ops.pytorch.layer_base import TransformerEmbeddingLayerBase
 from lightseq.training.ops.pytorch.quantization import (
     QuantLinear,
-    enable_quant,
     disable_quant,
-    qat_mode,
+    enable_quant,
     ptq_mode,
+    qat_mode,
 )
-
 
 DEFAULT_MIN_PARAMS_TO_WRAP = int(1e8)
 MAX_SEQ_LENGTH = 300
@@ -134,18 +134,41 @@ class LSTransformerModel(FairseqEncoderDecoderModel):
                 '--offload-activations are passed.'
             )
         )
+        # args for Gradient Communication Quantization (GCQ) in multi-machine distributed training
+        parser.add_argument('--enable_GCQ', default=False, action='store_true',
+                            help='enable gradient communication quantization')
+        parser.add_argument('--GCQ_quantile', type=float, default=0.99,
+                            help='quantile value of gradient communication quantization, between 0.0-1.0')
         # fmt: on
 
     @classmethod
     def build_model(cls, args, task):
         src_dict, tgt_dict = task.source_dictionary, task.target_dictionary
-
-        encoder_embed_tokens = cls.build_embedding(
-            args, src_dict, args.encoder_embed_dim, args.max_source_positions
-        )
-        decoder_embed_tokens = cls.build_embedding(
-            args, tgt_dict, args.decoder_embed_dim, args.max_target_positions
-        )
+        if args.share_all_embeddings:
+            if src_dict != tgt_dict:
+                raise ValueError("--share-all-embeddings requires a joined dictionary")
+            if args.encoder_embed_dim != args.decoder_embed_dim:
+                raise ValueError(
+                    "--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim"
+                )
+            encoder_embed_tokens = cls.build_embedding(
+                args, src_dict, args.encoder_embed_dim, args.max_source_positions
+            )
+            decoder_embed_tokens = cls.build_embedding(
+                args,
+                tgt_dict,
+                args.decoder_embed_dim,
+                args.max_target_positions,
+                emb_lookup=encoder_embed_tokens,
+            )
+            args.share_decoder_input_output_embed = True
+        else:
+            encoder_embed_tokens = cls.build_embedding(
+                args, src_dict, args.encoder_embed_dim, args.max_source_positions
+            )
+            decoder_embed_tokens = cls.build_embedding(
+                args, tgt_dict, args.decoder_embed_dim, args.max_target_positions
+            )
 
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
@@ -159,28 +182,28 @@ class LSTransformerModel(FairseqEncoderDecoderModel):
                     encoder.apply(ptq_mode)
                     decoder.apply(ptq_mode)
             else:
-                raise NotImplementedError
+                if args.quant_mode == "qat":
+                    encoder.apply(enable_quant)
+                    decoder.apply(enable_quant)
+                    encoder.apply(qat_mode)
+                    decoder.apply(qat_mode)
+
+                else:
+                    raise NotImplementedError
         else:
-            if args.use_torch_layer:
-                encoder.apply(disable_quant)
-                decoder.apply(disable_quant)
-            else:
-                pass
+            encoder.apply(disable_quant)
+            decoder.apply(disable_quant)
 
         return cls(args, encoder, decoder)
 
     @classmethod
-    def build_embedding(cls, args, dictionary, embed_dim, max_positions, **kwargs):
-        if args.use_torch_layer:
-            from lightseq.training.ops.pytorch.torch_transformer_layers import (
-                TransformerEmbeddingLayer,
-            )
-        else:
-            from lightseq.training.ops.pytorch.transformer_embedding_layer import (
-                LSTransformerEmbeddingLayer as TransformerEmbeddingLayer,
-            )
-
-        config = TransformerEmbeddingLayer.get_config(
+    def build_embedding(
+        cls, args, dictionary, embed_dim, max_positions, emb_lookup=None, **kwargs
+    ):
+        use_torch_layer = (
+            args.use_torch_layer or args.no_scale_embedding or args.layernorm_embedding
+        )
+        config = TransformerEmbeddingLayerBase.get_config(
             vocab_size=len(dictionary),
             embedding_dim=embed_dim,
             max_batch_tokens=args.max_tokens,
@@ -189,8 +212,27 @@ class LSTransformerModel(FairseqEncoderDecoderModel):
             dropout=args.dropout,
             fp16=args.fp16,
             local_rank=args.device_id,
+            trainable_pos=(args.encoder_learned_pos or args.decoder_learned_pos),
+            no_scale_embedding=args.no_scale_embedding,
+            layernorm_embedding=args.layernorm_embedding,
+            need_offset=("bart" in args.arch),
         )
-        emb = TransformerEmbeddingLayer(config)
+        if use_torch_layer:
+            from lightseq.training.ops.pytorch.torch_transformer_layers import (
+                TransformerEmbeddingLayer,
+            )
+
+            if emb_lookup is not None:
+                emb_lookup = emb_lookup.emb_lookup
+            emb = TransformerEmbeddingLayer(config, emb_lookup=emb_lookup)
+        else:
+            from lightseq.training.ops.pytorch.transformer_embedding_layer import (
+                LSTransformerEmbeddingLayer as TransformerEmbeddingLayer,
+            )
+
+            if emb_lookup is not None:
+                return emb_lookup
+            emb = TransformerEmbeddingLayer(config)
 
         return emb
 
@@ -202,9 +244,11 @@ class LSTransformerModel(FairseqEncoderDecoderModel):
     def build_decoder(cls, args, tgt_dict, embed_tokens):
         return LSTransformerDecoder(args, tgt_dict, embed_tokens)
 
-    def forward(self, src_tokens, prev_output_tokens, **kwargs):
+    def forward(self, src_tokens, prev_output_tokens, features_only=False, **kwargs):
         encoder_out = self.encoder(src_tokens)
-        decoder_out = self.decoder(prev_output_tokens, encoder_out)
+        decoder_out = self.decoder(
+            prev_output_tokens, encoder_out, features_only=features_only
+        )
         return decoder_out
 
 
@@ -222,7 +266,10 @@ class LSTransformerEncoder(FairseqEncoder):
         )
         self.num_layers = len(self.layers)
 
-        self.layer_norm = LayerNorm(embed_dim)
+        if args.encoder_normalize_before:
+            self.layer_norm = LayerNorm(embed_dim)
+        else:
+            self.layer_norm = None
 
     def build_encoder_layer(self, args):
         if args.use_torch_layer:
@@ -234,7 +281,7 @@ class LSTransformerEncoder(FairseqEncoder):
 
         config = TransformerEncoderLayer.get_config(
             max_batch_tokens=args.max_tokens,
-            max_seq_len=MAX_SEQ_LENGTH,
+            max_seq_len=args.max_source_positions,
             hidden_size=args.encoder_embed_dim,
             intermediate_size=args.encoder_ffn_embed_dim,
             nhead=args.encoder_attention_heads,
@@ -261,8 +308,8 @@ class LSTransformerEncoder(FairseqEncoder):
         # x: [batch_size, seq_len, hidden_size]
         for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-
-        x = self.layer_norm(x)
+        if self.layer_norm is not None:
+            x = self.layer_norm(x)
         self.batch_size = x.shape[0]
         self.beam_size = -1
 
@@ -336,7 +383,12 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
         )
         self.num_layers = len(self.layers)
 
-        self.layer_norm = LayerNorm(embed_dim)
+        if args.decoder_normalize_before and not getattr(
+            args, "no_decoder_final_norm", False
+        ):
+            self.layer_norm = LayerNorm(embed_dim)
+        else:
+            self.layer_norm = None
 
         if args.use_torch_layer:
             self.output_projection = QuantLinear(
@@ -345,16 +397,25 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
                 bias=False,
             )
             self.output_projection.weight_quant = self.embed_tokens.emb_quant
+            self.output_projection.weight = self.embed_tokens.embeddings
         else:
-            if args.enable_quant:
-                raise NotImplementedError
-            else:
-                self.output_projection = nn.Linear(
-                    self.embed_tokens.embeddings.shape[1],
-                    self.embed_tokens.embeddings.shape[0],
-                    bias=False,
-                )
-        self.output_projection.weight = self.embed_tokens.embeddings
+            from lightseq.training.ops.pytorch.quant_linear_layer import (
+                LSQuantLinearLayer,
+            )
+
+            config = LSQuantLinearLayer.get_config(
+                max_batch_tokens=self.args.max_tokens,
+                in_features=self.embed_tokens.config.embedding_dim,
+                out_features=self.embed_tokens.config.vocab_size,
+                bias=False,
+                fp16=self.args.fp16,
+                local_rank=self.args.device_id,
+            )
+            self.output_projection = LSQuantLinearLayer(config)
+            del self.output_projection.weight
+
+        self.quant_mode = args.enable_quant
+        self.use_torch_layer = args.use_torch_layer
 
     def build_decoder_layer(self, args):
         if args.use_torch_layer:
@@ -368,7 +429,7 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
 
         config = TransformerDecoderLayer.get_config(
             max_batch_tokens=args.max_tokens,
-            max_seq_len=MAX_SEQ_LENGTH,
+            max_seq_len=args.max_target_positions,
             hidden_size=args.decoder_embed_dim,
             intermediate_size=args.decoder_ffn_embed_dim,
             nhead=args.decoder_attention_heads,
@@ -393,11 +454,27 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
         return x, prev_output_tokens
 
     def forward(
-        self, prev_output_tokens, encoder_out, incremental_state=None, **kwargs
+        self,
+        prev_output_tokens,
+        encoder_out,
+        incremental_state=None,
+        features_only=False,
+        **kwargs
     ):
         x, prev_output_tokens = self.forward_embedding(
             prev_output_tokens, incremental_state
         )
+
+        if not self.use_torch_layer:
+            self.output_projection.weight = self.embed_tokens.para[
+                : self.embed_tokens.config.vocab_size
+                * self.embed_tokens.config.embedding_dim
+            ].reshape(
+                self.embed_tokens.config.vocab_size,
+                self.embed_tokens.config.embedding_dim,
+            )
+            if self.quant_mode:
+                self.output_projection.clip_max[1] = self.embed_tokens.para[-1].data
 
         # x: [batch_size, seq_len, hidden_size]
         for _, layer in enumerate(self.layers):
@@ -414,9 +491,11 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
                 incremental_state=incremental_state,
             )
 
-        x = self.layer_norm(x)
+        if self.layer_norm is not None:
+            x = self.layer_norm(x)
 
-        x = self.output_projection(x)
+        if not features_only:
+            x = self.output_projection(x)
         return x, None
 
     def max_positions(self):

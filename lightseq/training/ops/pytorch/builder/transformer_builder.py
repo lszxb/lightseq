@@ -20,7 +20,9 @@ class TransformerBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            "csrc/kernels/cublas_wrappers.cu",
+            "csrc/kernels/cublas_algo_map.cpp",
+            "csrc/kernels/cublas_wrappers.cpp",
+            "csrc/kernels/quantize_kernels.cu",
             "csrc/kernels/transform_kernels.cu",
             "csrc/kernels/dropout_kernels.cu",
             "csrc/kernels/normalize_kernels.cu",
@@ -29,17 +31,25 @@ class TransformerBuilder(CUDAOpBuilder):
             "csrc/kernels/cuda_util.cu",
             "csrc/kernels/embedding_kernels.cu",
             "csrc/kernels/cross_entropy.cu",
-            "csrc/ops/cross_entropy_layer.cpp",
-            "csrc/ops/transformer_encoder_layer.cpp",
-            "csrc/ops/transformer_decoder_layer.cpp",
-            "csrc/ops/transformer_embedding_layer.cpp",
-            "csrc/torch/pybind_op.cpp",
+            # "csrc/ops/context.cpp",
+            # "csrc/ops/dropout.cpp",
+            # "csrc/ops/feed_forward.cpp",
+            # "csrc/ops/normalize_layer.cpp",
+            # "csrc/ops/softmax.cpp",
+            # "csrc/ops/strided_batch_gemm.cpp",
+            "csrc/layers/cross_entropy_layer.cpp",
+            "csrc/layers/quant_linear_layer.cpp",
+            "csrc/layers/transformer_encoder_layer.cpp",
+            "csrc/layers/transformer_decoder_layer.cpp",
+            "csrc/layers/transformer_embedding_layer.cpp",
+            "csrc/pybind/pybind_layer.cpp",
         ]
 
     def include_paths(self):
         paths = [
             "csrc/kernels/includes",
             "csrc/ops/includes",
+            "csrc/layers/includes",
         ]
         cuda_major, cuda_minor = installed_cuda_version()
         if cuda_major < 11:
@@ -61,4 +71,9 @@ class TransformerBuilder(CUDAOpBuilder):
         return args + self.compute_capability_args()
 
     def cxx_args(self):
-        return ["-O3", "-std=c++17"]
+        return [
+            "-O3",
+            "-std=c++17",
+            "-g",
+            "-Wno-reorder",
+        ]

@@ -1,22 +1,11 @@
 from dataclasses import dataclass
+
 from torch import nn
+
 from lightseq.training.ops.pytorch.util import MODEL_ARCH, check_config
 
 
 class TransformerEncoderLayerBase(nn.Module):
-    """Initialize the Lightseq Transformer Encoder Layer.
-
-    Static variable:
-        layer_id: The layer-index counter starting from 0 and incrementing by 1 every time a layer object is instantiated,
-        e.g. if a model has 24 transformer layers, layer_id goes from 0 to 23.
-    Arguments:
-        config: An object of LSTransformerEncoderLayer config, see get_config
-
-        initial_weights: Optional: Only used for unit test
-
-        initial_biases: Optional: Only used for unit test
-    """
-
     @staticmethod
     def get_config(**kwargs):
         @dataclass
@@ -46,19 +35,6 @@ class TransformerEncoderLayerBase(nn.Module):
 
 
 class TransformerDecoderLayerBase(nn.Module):
-    """Initialize the Lightseq Transformer Encoder Layer.
-
-    Static variable:
-        layer_id: The layer-index counter starting from 0 and incrementing by 1 every time a layer object is instantiated,
-        e.g. if a model has 24 transformer layers, layer_id goes from 0 to 23.
-    Arguments:
-        config: An object of LSTransformerEncoderLayer config, see get_config
-
-        initial_weights: Optional: Only used for unit test
-
-        initial_biases: Optional: Only used for unit test
-    """
-
     @staticmethod
     def get_config(**kwargs):
         @dataclass
@@ -76,6 +52,7 @@ class TransformerDecoderLayerBase(nn.Module):
             local_rank: int  # rank in local node
             nlayer: int  # number of layers
             activation_fn: str = "relu"  # relu or gelu
+            has_cross_attn: bool = True
 
         if "model" in kwargs:
             if kwargs["model"] not in MODEL_ARCH:
@@ -89,19 +66,6 @@ class TransformerDecoderLayerBase(nn.Module):
 
 
 class TransformerEmbeddingLayerBase(nn.Module):
-    """Initialize the Lightseq Transformer Encoder Layer.
-
-    Static variable:
-        layer_id: The layer-index counter starting from 0 and incrementing by 1 every time a layer object is instantiated,
-        e.g. if a model has 24 transformer layers, layer_id goes from 0 to 23.
-    Arguments:
-        config: An object of LSTransformerEncoderLayer config, see get_config
-
-        initial_weights: Optional: Only used for unit test
-
-        initial_biases: Optional: Only used for unit test
-    """
-
     @staticmethod
     def get_config(**kwargs):
         @dataclass
@@ -114,5 +78,9 @@ class TransformerEmbeddingLayerBase(nn.Module):
             dropout: float  # embedding dropout ration
             fp16: bool  # fp16 presion
             local_rank: int  # rank in local node
+            trainable_pos: bool = False  # trainable positional embedding
+            no_scale_embedding: bool = False  # scale embedding
+            layernorm_embedding: bool = False  # layernorm for embedding
+            need_offset: bool = False  # position offset for bart
 
         return Config(**kwargs)

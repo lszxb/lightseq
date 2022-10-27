@@ -225,5 +225,12 @@ T* to_gpu(const T* host_pointer, int size, cudaStream_t stream) {
   return gpu_pointer;
 }
 
+float dequantize(unsigned char i, float scale, float clip_max);
+
+void dequantize_array(std::vector<unsigned char>& i8, std::vector<float>& f,
+                      float clip_max, float quant_range, int start, int num);
+
+std::string getGPUName();
+
 }  // namespace cuda
 }  // namespace lightseq

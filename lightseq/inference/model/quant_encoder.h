@@ -15,10 +15,11 @@
 
 #include "../proto/quant_transformer_weight.h"
 #include "../tools/util.h"
+#include "cublas_algo_map.h"
 
 /**
 @file
-Transformer decoder, composed by gemm lib and
+QuantTransformer encoder, composed by gemm lib and
   custom cuda kernel function
 */
 
@@ -47,6 +48,8 @@ class QuantEncoder {
   cudaStream_t _stream;
   cublasHandle_t _hd;
   cublasLtHandle_t _cublas_lt_handle;
+  cublasAlgoMap _algo_map;
+  const bool _sm_gt_eq_80;
 
   const _DataType _fone;
   const _DataType _fzero;
@@ -99,7 +102,6 @@ class QuantEncoder {
                _DataType *p_d_output, const QuantTransformerWeight<OpType_> &tw,
                cudaStream_t stream, cublasHandle_t hd,
                const int *p_d_lang_id = nullptr);
-  long compute_buffer_bytesize();
   void init_buffer();
   std::string check();
   void run_one_infer(int batch_size, int batch_seq_len);

@@ -7,7 +7,7 @@
 
 /**
 @file
-Transformer encoder, composed by gemm lib and
+QuantTransformer encoder, composed by gemm lib and
   custom cuda kernel function
 */
 
@@ -41,21 +41,10 @@ QuantEncoder<OpType_>::QuantEncoder(int max_batch_size, int *p_d_token_id,
 
       _atten_scaler((_DataType)sqrt(1.f / tw._dim_per_head)),
       _max_batch_dim(max_batch_size * tw._max_step * tw._hidden_size),
-      _max_thread_per_block(1024) {
+      _max_thread_per_block(1024),
+      _algo_map(),
+      _sm_gt_eq_80(getSMVersion() >= 80 ? true : false) {
   CHECK_GPU_ERROR(cublasLtCreate(&_cublas_lt_handle));
-}
-
-/**
-Compute GPU memory size needed by transformer encoder,
-  to see how these memory is used, checkout init_buffer() for detail
-*/
-template <OperationType OpType_>
-long QuantEncoder<OpType_>::compute_buffer_bytesize() {
-  // long sz1 = _max_batch_dim * 6 +
-  //            _max_batch_size * _tw._head_num * _tw._max_step * _tw._max_step;
-  // long sz2 = _max_batch_dim + _max_batch_size * _tw._max_step *
-  // _tw._inner_size; return max(sz1, sz2) * sizeof(_DataType);
-  return 0;
 }
 
 /**
@@ -89,9 +78,10 @@ void QuantEncoder<OpType_>::init_buffer() {
   CHECK_GPU_ERROR(
       cudaMalloc(&_int8_p_d_src_emb_wei,
                  _tw._src_vocab_size * _tw._hidden_size * sizeof(int8_t)));
-  quantize_weight(_p_d_src_emb_wei[0], _int8_p_d_src_emb_wei, _tw._hidden_size,
-                  _tw._src_vocab_size, _quant_range / _src_emb_clip_max,
-                  _stream, _cublas_lt_handle, kRowMajor);
+  quantize_weight(_p_d_src_emb_wei[0], _int8_p_d_src_emb_wei,
+                  _tw._src_vocab_size, _tw._hidden_size,
+                  _quant_range / _src_emb_clip_max, _stream, _cublas_lt_handle,
+                  kRowMajor);
 
   _p_device_emb.push_back(nullptr);
   _p_device_emb.push_back(
@@ -142,29 +132,31 @@ void QuantEncoder<OpType_>::init_buffer() {
     _p_device_wei.push_back(
         to_gpu(_p_d_enc_wei[_weight_offset + 11], _tw._hidden_size, _stream));
 
+    auto weight_layout = _sm_gt_eq_80 ? kColMajor : kColMajor32;
+
     quantize_weight(_p_d_enc_wei[_weight_offset + 2],
                     _int8_p_d_enc_wei[_layer_id * 4], _tw._hidden_size,
                     _tw._hidden_size * 3,
                     _quant_range / _enc_clip_max[_layer_id * 12], _stream,
-                    _cublas_lt_handle);
+                    _cublas_lt_handle, weight_layout);
 
     quantize_weight(_p_d_enc_wei[_weight_offset + 4],
                     _int8_p_d_enc_wei[_layer_id * 4 + 1], _tw._hidden_size,
                     _tw._hidden_size,
                     _quant_range / _enc_clip_max[_layer_id * 12 + 1], _stream,
-                    _cublas_lt_handle);
+                    _cublas_lt_handle, weight_layout);
 
     quantize_weight(_p_d_enc_wei[_weight_offset + 8],
                     _int8_p_d_enc_wei[_layer_id * 4 + 2], _tw._hidden_size,
                     _tw._inner_size,
                     _quant_range / _enc_clip_max[_layer_id * 12 + 2], _stream,
-                    _cublas_lt_handle);
+                    _cublas_lt_handle, weight_layout);
 
     quantize_weight(_p_d_enc_wei[_weight_offset + 10],
                     _int8_p_d_enc_wei[_layer_id * 4 + 3], _tw._inner_size,
                     _tw._hidden_size,
                     _quant_range / _enc_clip_max[_layer_id * 12 + 3], _stream,
-                    _cublas_lt_handle);
+                    _cublas_lt_handle, weight_layout);
 
     if (_tw._use_gelu) {
       _scaled_ffn2_colsum[_layer_id] = nullptr;
@@ -247,7 +239,7 @@ void QuantEncoder<OpType_>::run_one_infer(int batch_size, int batch_seq_len) {
       _int8_p_d_src_emb_wei, _p_device_emb[1], _p_d_token_id, _p_d_output,
       _p_d_padding_mask, _tw._padding_id, batch_size, batch_seq_len,
       _tw._hidden_size, _stream, _p_device_emb[4], _p_d_lang_id,
-      _tw._multilg_type, _src_emb_clip_max / _quant_range);
+      _tw._multilg_type, _src_emb_clip_max / _quant_range, true);
 #ifdef DEBUG_RESULT
   for (int i = 0; i < _batch_size; i++) {       // batch_id
     for (int j = 0; j < _batch_seq_len; j++) {  // token_id
@@ -290,17 +282,26 @@ void QuantEncoder<OpType_>::self_attention() {
         _int8_ffn_in_buf, _p_device_wei[_weight_offset],
         _p_device_wei[_weight_offset + 1], _p_device_wei[_weight_offset + 5],
         _max_thread_per_block, _quant_range / _enc_clip_max[_layer_id * 12 + 4],
-        _tw._is_post_ln, true);
+        _tw._is_post_ln, !_sm_gt_eq_80);
   }
   CHECK_GPU_ERROR(cudaGetLastError());
 
-  cublasLtMM_withAlgo_i8IO(
-      _int8_ffn_out_buf, 1, _batch_token_num, _tw._hidden_size * 3,
-      _tw._hidden_size, 0, 0, 0,
-      _enc_clip_max[_layer_id * 12] * _enc_clip_max[_layer_id * 12 + 4] /
-          (_enc_clip_max[_layer_id * 12 + 8] * _quant_range),
-      _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4], _cublas_lt_handle,
-      _stream, false);
+  if (_sm_gt_eq_80) {
+    cublaslt_gemm(
+        _int8_p_d_enc_wei[_layer_id * 4], _int8_ffn_in_buf, _int8_ffn_out_buf,
+        1, _tw._hidden_size * 3, _batch_token_num, _tw._hidden_size, 0, 0, 0,
+        _enc_clip_max[_layer_id * 12] * _enc_clip_max[_layer_id * 12 + 4] /
+            (_enc_clip_max[_layer_id * 12 + 8] * _quant_range),
+        _cublas_lt_handle, _stream, _algo_map);
+  } else {
+    cublasLtMM_withAlgo_i8IO(
+        _int8_ffn_out_buf, 1, _batch_token_num, _tw._hidden_size * 3,
+        _tw._hidden_size, 0, 0, 0,
+        _enc_clip_max[_layer_id * 12] * _enc_clip_max[_layer_id * 12 + 4] /
+            (_enc_clip_max[_layer_id * 12 + 8] * _quant_range),
+        _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4], _cublas_lt_handle,
+        _stream, _sm_gt_eq_80);
+  }
 
   // get q, k, v by split and reshape qkv
 
@@ -308,7 +309,7 @@ void QuantEncoder<OpType_>::self_attention() {
       _batch_token_num, _tw._hidden_size, _stream, _int8_ffn_out_buf,
       _p_device_wei[_weight_offset + 3], _p_d_q, _max_batch_dim, _batch_seq_len,
       _tw._dim_per_head, _tw._head_num, _max_thread_per_block,
-      _enc_clip_max[_layer_id * 12 + 8] / _quant_range, true);
+      _enc_clip_max[_layer_id * 12 + 8] / _quant_range, !_sm_gt_eq_80);
 
   /* ---step 2. correlation = q * k, perform softmax on correlation--- */
   CHECK_GPU_ERROR(cublasGemmStridedBatchedEx(
@@ -338,17 +339,27 @@ void QuantEncoder<OpType_>::self_attention() {
   ker_arrange_atten_output_i8O_launcher<_DataType>(
       _batch_token_num, _tw._hidden_size, _stream, _p_d_q, _int8_ffn_in_buf,
       _batch_seq_len, _tw._dim_per_head, _tw._head_num, _max_thread_per_block,
-      _quant_range / _enc_clip_max[_layer_id * 12 + 5], true);
+      _quant_range / _enc_clip_max[_layer_id * 12 + 5], !_sm_gt_eq_80);
 
   /* ---step 4. new_q = ori_q + new_q * output_wei--- */
 
-  cublasLtMM_withAlgo_i8IO(
-      _int8_ffn_out_buf, 1, _batch_token_num, _tw._hidden_size,
-      _tw._hidden_size, 0, 0, 0,
-      _enc_clip_max[_layer_id * 12 + 1] * _enc_clip_max[_layer_id * 12 + 5] /
-          (_enc_clip_max[_layer_id * 12 + 9] * _quant_range),
-      _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4 + 1], _cublas_lt_handle,
-      _stream, false);
+  if (_sm_gt_eq_80) {
+    cublaslt_gemm(_int8_p_d_enc_wei[_layer_id * 4 + 1], _int8_ffn_in_buf,
+                  _int8_ffn_out_buf, 1, _tw._hidden_size, _batch_token_num,
+                  _tw._hidden_size, 0, 0, 0,
+                  _enc_clip_max[_layer_id * 12 + 1] *
+                      _enc_clip_max[_layer_id * 12 + 5] /
+                      (_enc_clip_max[_layer_id * 12 + 9] * _quant_range),
+                  _cublas_lt_handle, _stream, _algo_map);
+  } else {
+    cublasLtMM_withAlgo_i8IO(
+        _int8_ffn_out_buf, 1, _batch_token_num, _tw._hidden_size,
+        _tw._hidden_size, 0, 0, 0,
+        _enc_clip_max[_layer_id * 12 + 1] * _enc_clip_max[_layer_id * 12 + 5] /
+            (_enc_clip_max[_layer_id * 12 + 9] * _quant_range),
+        _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4 + 1],
+        _cublas_lt_handle, _stream, _sm_gt_eq_80);
+  }
 
   ker_residual_bias_ln_i8I_i8O_launcher<_DataType>(
       _int8_ffn_out_buf, _p_device_wei[_weight_offset + 6],
@@ -356,54 +367,80 @@ void QuantEncoder<OpType_>::self_attention() {
       _int8_ffn_in_buf, _p_d_output, _batch_token_num, _tw._hidden_size,
       _enc_clip_max[_layer_id * 12 + 9] / _quant_range,
       _quant_range / _enc_clip_max[_layer_id * 12 + 6], _max_thread_per_block,
-      _stream, _tw._is_post_ln, true);
+      _stream, _tw._is_post_ln, !_sm_gt_eq_80, !_sm_gt_eq_80);
 
   return;
 }
 
 template <OperationType OpType_>
 void QuantEncoder<OpType_>::ffn_add_norm() {
-  cublasLtMM_withAlgo_i8IO(
-      _int8_ffn_out_buf, 1, _batch_token_num, _tw._inner_size, _tw._hidden_size,
-      0, 0, 0,
-      _enc_clip_max[_layer_id * 12 + 2] * _enc_clip_max[_layer_id * 12 + 6] /
-          (_enc_clip_max[_layer_id * 12 + 10] * _quant_range),
-      _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4 + 2], _cublas_lt_handle,
-      _stream, false);
+  if (_sm_gt_eq_80) {
+    cublaslt_gemm(_int8_p_d_enc_wei[_layer_id * 4 + 2], _int8_ffn_in_buf,
+                  _int8_ffn_out_buf, 1, _tw._inner_size, _batch_token_num,
+                  _tw._hidden_size, 0, 0, 0,
+                  _enc_clip_max[_layer_id * 12 + 2] *
+                      _enc_clip_max[_layer_id * 12 + 6] /
+                      (_enc_clip_max[_layer_id * 12 + 10] * _quant_range),
+                  _cublas_lt_handle, _stream, _algo_map);
+  } else {
+    cublasLtMM_withAlgo_i8IO(
+        _int8_ffn_out_buf, 1, _batch_token_num, _tw._inner_size,
+        _tw._hidden_size, 0, 0, 0,
+        _enc_clip_max[_layer_id * 12 + 2] * _enc_clip_max[_layer_id * 12 + 6] /
+            (_enc_clip_max[_layer_id * 12 + 10] * _quant_range),
+        _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4 + 2],
+        _cublas_lt_handle, _stream, _sm_gt_eq_80);
+  }
 
   if (_tw._use_gelu) {
     ker_bias_gelu_i8I_i8O_launcher<_DataType>(
         _batch_token_num, _stream, _int8_ffn_out_buf, _int8_ffn_in_buf,
         _p_device_wei[_weight_offset + 9], _tw._inner_size,
         _enc_clip_max[_layer_id * 12 + 10] / _quant_range,
-        _quant_range / _enc_clip_max[_layer_id * 12 + 7], true);
+        _quant_range / _enc_clip_max[_layer_id * 12 + 7], !_sm_gt_eq_80,
+        !_sm_gt_eq_80);
   } else {
     ker_bias_relu_i8I_i8O_launcher<_DataType>(
         _batch_token_num, _stream, _int8_ffn_out_buf, _int8_ffn_in_buf,
         _p_device_wei[_weight_offset + 9], _tw._inner_size,
         _enc_clip_max[_layer_id * 12 + 10] / _quant_range,
         _quant_range / _enc_clip_max[_layer_id * 12 + 7],
-        _enc_clip_max[_layer_id * 12 + 7], true, true, true);
+        _enc_clip_max[_layer_id * 12 + 7], !_sm_gt_eq_80, !_sm_gt_eq_80, true);
   }
 
   /* ---step 2. second ffn layer--- */
-  cublasLtMM_withAlgo(_int32_ffn_out_buf, 1, _batch_token_num, _tw._hidden_size,
-                      _tw._inner_size, 0, 0, 0, _int8_ffn_in_buf,
-                      _int8_p_d_enc_wei[_layer_id * 4 + 3], _cublas_lt_handle,
-                      _stream, false);
+  if (_sm_gt_eq_80) {
+    cublaslt_gemm(_int8_p_d_enc_wei[_layer_id * 4 + 3], _int8_ffn_in_buf,
+                  _int32_ffn_out_buf, 1, _tw._hidden_size, _batch_token_num,
+                  _tw._inner_size, 0, 0, 0, 1, _cublas_lt_handle, _stream,
+                  _algo_map);
+  } else {
+    cublasLtMM_withAlgo(_int32_ffn_out_buf, 1, _batch_token_num,
+                        _tw._hidden_size, _tw._inner_size, 0, 0, 0,
+                        _int8_ffn_in_buf, _int8_p_d_enc_wei[_layer_id * 4 + 3],
+                        _cublas_lt_handle, _stream, _sm_gt_eq_80);
+  }
 
   const _DataType *scale_ptr, *bias_ptr, *res_bias_ptr;
-  float clip_max;
+  float clip_max, dequant_scale;
+  if (_tw._use_gelu) {
+    dequant_scale = _enc_clip_max[_layer_id * 12 + 3] *
+                    _enc_clip_max[_layer_id * 12 + 7] /
+                    (_quant_range * _quant_range);
+  } else {
+    dequant_scale = _enc_clip_max[_layer_id * 12 + 3] *
+                    _enc_clip_max[_layer_id * 12 + 7] /
+                    (2 * _quant_range * _quant_range);
+  }
   if (_layer_id == _tw._n_enc_layer - 1) {
     scale_ptr = _p_device_emb[2];
     bias_ptr = _p_device_emb[3];
 
     ker_residual_bias_ln_i32I_launcher<_DataType>(
         _int32_ffn_out_buf, scale_ptr, bias_ptr, _p_d_output, _p_d_output,
-        _batch_token_num, _tw._hidden_size,
-        _enc_clip_max[_layer_id * 12 + 3] * _enc_clip_max[_layer_id * 12 + 7] /
-            (2 * _quant_range * _quant_range),
-        _max_thread_per_block, _stream, true, _scaled_ffn2_colsum[_layer_id]);
+        _batch_token_num, _tw._hidden_size, dequant_scale,
+        _max_thread_per_block, _stream, !_sm_gt_eq_80,
+        _scaled_ffn2_colsum[_layer_id]);
   } else {
     scale_ptr = _p_device_wei[(_layer_id + 1) * _tw._weight_per_enc_layer];
     bias_ptr = _p_device_wei[(_layer_id + 1) * _tw._weight_per_enc_layer + 1];
@@ -413,11 +450,10 @@ void QuantEncoder<OpType_>::ffn_add_norm() {
 
     ker_residual_bias_ln_i32I_i8O_launcher<_DataType>(
         _int32_ffn_out_buf, scale_ptr, bias_ptr, res_bias_ptr, _int8_ffn_in_buf,
-        _p_d_output, _batch_token_num, _tw._hidden_size,
-        _enc_clip_max[_layer_id * 12 + 3] * _enc_clip_max[_layer_id * 12 + 7] /
-            (2 * _quant_range * _quant_range),
+        _p_d_output, _batch_token_num, _tw._hidden_size, dequant_scale,
         _quant_range / clip_max, _max_thread_per_block, _stream,
-        _tw._is_post_ln, true, true, _scaled_ffn2_colsum[_layer_id]);
+        _tw._is_post_ln, !_sm_gt_eq_80, !_sm_gt_eq_80,
+        _scaled_ffn2_colsum[_layer_id]);
   }
 
   return;

@@ -1,8 +1,8 @@
 """
-Export LightSeq fp16/fp32 Transformer models to int8 protobuf format,
-and then using int8 quantization to speedup inference.
+Export LightSeq Transformer models to int8 protobuf format using post training quantization.
 Refer to the `examples/training/custom` directory for more training details.
 """
+import argparse
 import time
 import numpy as np
 import torch
@@ -34,16 +34,13 @@ def _extract_weight(state_dict):
     return encoder_state_dict, decoder_state_dict
 
 
-def export_other_weights(ls_infer_model, state_dict):
+def export_other_weights(ls_infer_model, state_dict, vocab_size):
     enc_norm_w = state_dict["encoder.layer_norm.weight"].flatten().tolist()
     enc_norm_b = state_dict["encoder.layer_norm.bias"].flatten().tolist()
     dec_norm_w = state_dict["decoder.layer_norm.weight"].flatten().tolist()
     dec_norm_b = state_dict["decoder.layer_norm.bias"].flatten().tolist()
-    dec_shared_b = (
-        torch.zeros(state_dict["decoder.embed_tokens.embeddings"].size(0))
-        .flatten()
-        .tolist()
-    )
+    dec_shared_b = torch.zeros(vocab_size).flatten().tolist()
+
     ls_infer_model.src_embedding.norm_scale[:] = enc_norm_w
     ls_infer_model.src_embedding.norm_bias[:] = enc_norm_b
     ls_infer_model.trg_embedding.norm_scale[:] = dec_norm_w
@@ -59,12 +56,14 @@ def export_pb(state_dict, pb_path, pad_id, start_id, end_id, config):
         ls_infer_model,
         encoder_state_dict,
         config.max_seq_len,
+        config.hidden_size,
         True,
     )
     export_ls_embedding_ptq(
         ls_infer_model,
         decoder_state_dict,
         config.max_seq_len,
+        config.hidden_size,
         is_encoder=False,
     )
     export_ls_encoder_ptq(
@@ -82,7 +81,7 @@ def export_pb(state_dict, pb_path, pad_id, start_id, end_id, config):
         config.num_decoder_layer,
         act_clip_max=global_act_clip_max,
     )
-    export_other_weights(ls_infer_model, state_dict)
+    export_other_weights(ls_infer_model, state_dict, config.vocab_size)
     export_ls_config(
         ls_infer_model,
         config.nhead,
@@ -183,6 +182,19 @@ def ls_predict(ls_infer_model, src_tokens):
     return ls_output, end_time - start_time
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="export LightSeq checkpoint", usage="")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default="checkpoint_best.pt",
+        help="path of LightSeq checkpoint",
+    )
+    args = parser.parse_args()
+    return args
+
+
 if __name__ == "__main__":
     (
         tokenizer,
@@ -200,10 +212,11 @@ if __name__ == "__main__":
         trg_seq_len,
     ) = create_data()
 
-    ckpt_path = "checkpoint.pt"
-    pb_path = "quant_transformer.pb"
+    args = parse_args()
+    model_name = ".".join(args.model.split(".")[:-1])
+    pb_path = f"{model_name}_ptq.pb"
 
-    with open(ckpt_path, "rb") as fin:
+    with open(args.model, "rb") as fin:
         state_dict = torch.load(fin, map_location=torch.device("cpu"))
 
     config = create_config(vocab_size)

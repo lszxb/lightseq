@@ -332,18 +332,18 @@ class FakeTensorQuantFunction(Function):
 
     @staticmethod
     def forward(ctx, inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
-        # ctx.save_for_backward(inputs, amax)
+        ctx.save_for_backward(inputs, amax)
         outputs, scale = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
         if unsigned:
-            outputs += 127
+            outputs += (2.0 ** (num_bits - 1)) - 1.0
         return (outputs * scale).to(inputs.dtype)
 
     @staticmethod
     def backward(ctx, grad_outputs):
-        # inputs, amax = ctx.saved_tensors
-        # zero = grad_outputs.new_zeros(1)
-        # grad_inputs = torch.where(inputs.abs() <= amax, grad_outputs, zero)
-        return grad_outputs, None, None, None, None
+        inputs, amax = ctx.saved_tensors
+        zero = grad_outputs.new_zeros(1)
+        grad_inputs = torch.where(inputs.abs() <= amax, grad_outputs, zero)
+        return grad_inputs, None, None, None, None
 
 
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
@@ -394,7 +394,7 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     # (x + 0.5).floor() match the implementation of tensorflow fake_quant
     outputs = inputs / scale
     if unsigned:
-        outputs -= 127
+        outputs -= (2.0 ** (num_bits - 1)) - 1.0
     outputs = (outputs + 0.5).floor_()
     outputs = torch.clamp(outputs, min_bound, max_bound)
 

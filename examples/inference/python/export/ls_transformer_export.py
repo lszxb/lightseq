@@ -1,7 +1,8 @@
 """
-Export LightSeq Transformer models to protobuf/hdf5 format.
+Export LightSeq Transformer models to protobuf format.
 Refer to the `examples/training/custom` directory for more training details.
 """
+import argparse
 import time
 import numpy as np
 import torch
@@ -29,16 +30,13 @@ def _extract_weight(state_dict):
     return encoder_state_dict, decoder_state_dict
 
 
-def export_other_weights(ls_infer_model, state_dict):
+def export_other_weights(ls_infer_model, state_dict, vocab_size):
     enc_norm_w = state_dict["encoder.layer_norm.weight"].flatten().tolist()
     enc_norm_b = state_dict["encoder.layer_norm.bias"].flatten().tolist()
     dec_norm_w = state_dict["decoder.layer_norm.weight"].flatten().tolist()
     dec_norm_b = state_dict["decoder.layer_norm.bias"].flatten().tolist()
-    dec_shared_b = (
-        torch.zeros(state_dict["decoder.embed_tokens.embeddings"].size(0))
-        .flatten()
-        .tolist()
-    )
+    dec_shared_b = torch.zeros(vocab_size).flatten().tolist()
+
     ls_infer_model.src_embedding.norm_scale[:] = enc_norm_w
     ls_infer_model.src_embedding.norm_bias[:] = enc_norm_b
     ls_infer_model.trg_embedding.norm_scale[:] = dec_norm_w
@@ -50,8 +48,16 @@ def export_pb(state_dict, pb_path, pad_id, start_id, end_id, config):
     encoder_state_dict, decoder_state_dict = _extract_weight(state_dict)
     ls_infer_model = Transformer()
 
-    export_ls_embedding(ls_infer_model, encoder_state_dict, config.max_seq_len, True)
-    export_ls_embedding(ls_infer_model, decoder_state_dict, config.max_seq_len, False)
+    export_ls_embedding(
+        ls_infer_model, encoder_state_dict, config.max_seq_len, config.hidden_size, True
+    )
+    export_ls_embedding(
+        ls_infer_model,
+        decoder_state_dict,
+        config.max_seq_len,
+        config.hidden_size,
+        False,
+    )
     export_ls_encoder(
         ls_infer_model,
         encoder_state_dict,
@@ -65,7 +71,7 @@ def export_pb(state_dict, pb_path, pad_id, start_id, end_id, config):
         config.intermediate_size,
         config.num_decoder_layer,
     )
-    export_other_weights(ls_infer_model, state_dict)
+    export_other_weights(ls_infer_model, state_dict, config.vocab_size)
     export_ls_config(
         ls_infer_model,
         config.nhead,
@@ -142,7 +148,7 @@ def create_data():
     )
 
 
-def create_model(vocab_size):
+def create_config(vocab_size):
     transformer_config = LSTransformer.get_config(
         model="transformer-base",
         max_batch_tokens=2048,
@@ -154,29 +160,7 @@ def create_model(vocab_size):
         fp16=True,
         local_rank=0,
     )
-    model = LSTransformer(transformer_config)
-    model.to(dtype=torch.half, device=torch.device("cuda:0"))
-    return model
-
-
-def ls_train_predict(ls_train_model, src_tokens, trg_tokens, batch_size):
-    """
-    NOTE: We do not use beam search here for implementation simplicity.
-    """
-    torch.cuda.synchronize()
-    start_time = time.perf_counter()
-    encoder_out, encoder_padding_mask = ls_train_model.encoder(src_tokens)
-    predict_tokens = trg_tokens[:, :1]
-    cache = {}
-    for _ in range(trg_seq_len - 1):
-        output = ls_train_model.decoder(
-            predict_tokens[:, -1:], encoder_out, encoder_padding_mask, cache
-        )
-        output = torch.reshape(torch.argmax(output, dim=-1), (batch_size, -1))
-        predict_tokens = torch.cat([predict_tokens, output], dim=-1)
-    torch.cuda.synchronize()
-    end_time = time.perf_counter()
-    return predict_tokens, end_time - start_time
+    return transformer_config
 
 
 def ls_predict(ls_infer_model, src_tokens):
@@ -186,6 +170,19 @@ def ls_predict(ls_infer_model, src_tokens):
     torch.cuda.synchronize()
     end_time = time.perf_counter()
     return ls_output, end_time - start_time
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="export LightSeq checkpoint", usage="")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default="checkpoint_best.pt",
+        help="path of LightSeq checkpoint",
+    )
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
@@ -205,33 +202,22 @@ if __name__ == "__main__":
         trg_seq_len,
     ) = create_data()
 
-    ckpt_path = "checkpoint.pt"
-    pb_path = "transformer.pb"
+    args = parse_args()
+    model_name = ".".join(args.model.split(".")[:-1])
+    pb_path = f"{model_name}.pb"
 
-    with open(ckpt_path, "rb") as fin:
+    with open(args.model, "rb") as fin:
         state_dict = torch.load(fin, map_location=torch.device("cpu"))
 
-    ls_train_model = create_model(vocab_size)
-    ls_train_model.load_state_dict(state_dict)
-    ls_train_model.eval()
-    print("torch model loaded.")
+    config = create_config(vocab_size)
 
-    export_pb(state_dict, pb_path, pad_id, start_id, end_id, ls_train_model.config)
+    export_pb(state_dict, pb_path, pad_id, start_id, end_id, config)
     ls_infer_model = lsi.Transformer(pb_path, 8)
 
     src_tokens_np = np.array(src_tokens.cpu())
 
     print("========================WARM UP========================")
-    ls_train_predict(ls_train_model, src_tokens, trg_tokens, batch_size)
     ls_predict(ls_infer_model, src_tokens_np)
-
-    print("========================TORCH TEST========================")
-    predict_tokens, ls_train_time = ls_train_predict(
-        ls_train_model, src_tokens, trg_tokens, batch_size
-    )
-    mask = torch.cumsum(torch.eq(predict_tokens, end_id).int(), dim=1)
-    predict_tokens = predict_tokens.masked_fill(mask > 0, end_id)
-    predict_text = tokenizer.batch_decode(predict_tokens, skip_special_tokens=True)
 
     print("========================LIGHTSEQ TEST========================")
     ls_output, ls_time = ls_predict(ls_infer_model, src_tokens_np)
@@ -242,9 +228,6 @@ if __name__ == "__main__":
     print("\n".join(src_text))
     print(">>>>> target text")
     print("\n".join(trg_text))
-    print(">>>>> lightseq (train) predict text")
-    print("\n".join(predict_text))
     print(">>>>> lightseq (infer) predict text")
     print("\n".join(ls_predict_text))
-    print("lightseq (train) predict time: {}ms".format(ls_train_time * 1000))
     print("lightseq (infer) predict time: {}ms".format(ls_time * 1000))

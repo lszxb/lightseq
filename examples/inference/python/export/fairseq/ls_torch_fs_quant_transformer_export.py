@@ -1,20 +1,20 @@
 """
-Export quantized Fairseq Transformer models training using custom Torch layers to protobuf/hdf5 format.
+Export quantized Fairseq Transformer models training with custom Torch layers
+and other LightSeq modules to int8 protobuf format.
 Refer to the `examples/training/fairseq` directory for more training details.
 """
 from collections import OrderedDict
-import argparse
 
 import torch
-import tensorflow as tf
 from export.proto.quant_transformer_pb2 import QuantTransformer
 from lightseq.training.ops.pytorch.export import export_ls_config, apply_rule
-from lightseq.training.ops.pytorch.export_ptq import (
+from lightseq.training.ops.pytorch.export_quant import (
     gather_quant_token_embedding,
     quantize,
 )
 from lightseq.training.ops.pytorch.util import get_pos_embedding
 import lightseq.inference as lsi
+from export.util import parse_args, save_model
 
 
 enc_layer_mapping_dict = OrderedDict(
@@ -32,18 +32,18 @@ enc_layer_mapping_dict = OrderedDict(
         "ffn_second_kernel": "fc2 weight&&expression_.transpose(0, 1)",
         "ffn_second_bias": "fc2 bias",
         # weight_clip_max
-        "multihead_project_kernel_qkv_clip_max": "self_attn qkv_proj weight_quant clip_value_max",
-        "multihead_project_kernel_output_clip_max": "self_attn out_proj weight_quant clip_value_max",
-        "ffn_first_kernel_clip_max": "fc1 weight_quant clip_value_max",
-        "ffn_second_kernel_clip_max": "fc2 weight_quant clip_value_max",
+        "multihead_project_kernel_qkv_clip_max": "self_attn qkv_proj weight_quant _amax",
+        "multihead_project_kernel_output_clip_max": "self_attn out_proj weight_quant _amax",
+        "ffn_first_kernel_clip_max": "fc1 weight_quant _amax",
+        "ffn_second_kernel_clip_max": "fc2 weight_quant _amax",
         # act_clip_max
         "multihead_ln_clip_max": "self_attn qkv_proj input_quant clip_value_max",
         "multihead_project_output_clip_max": "self_attn out_proj input_quant clip_value_max",
         "ffn_ln_clip_max": "fc1 input_quant clip_value_max",
         "ffn_first_act_clip_max": "fc2 input_quant clip_value_max",
-        "multihead_qkv_dense_clip_max": "self_attn qkv_proj output_quant clip_value_max",
-        "multihead_output_dense_clip_max": "self_attn out_proj output_quant clip_value_max",
-        "ffn_first_output_clip_max": "fc1 output_quant clip_value_max",
+        "multihead_qkv_dense_clip_max": "self_attn qkv_proj output_quant _amax",
+        "multihead_output_dense_clip_max": "self_attn out_proj output_quant _amax",
+        "ffn_first_output_clip_max": "fc1 output_quant _amax",
     }
 )
 
@@ -68,12 +68,12 @@ dec_layer_mapping_dict = OrderedDict(
         "ffn_second_kernel": "fc2 weight&&expression_.transpose(0, 1)",
         "ffn_second_bias": "fc2 bias",
         # weight_clip_max
-        "self_project_kernel_qkv_clip_max": "self_attn qkv_proj weight_quant clip_value_max",
-        "self_project_kernel_output_clip_max": "self_attn out_proj weight_quant clip_value_max",
-        "encdec_project_kernel_q_clip_max": "encoder_attn q_proj weight_quant clip_value_max",
-        "encdec_project_kernel_output_clip_max": "encoder_attn out_proj weight_quant clip_value_max",
-        "ffn_first_kernel_clip_max": "fc1 weight_quant clip_value_max",
-        "ffn_second_kernel_clip_max": "fc2 weight_quant clip_value_max",
+        "self_project_kernel_qkv_clip_max": "self_attn qkv_proj weight_quant _amax",
+        "self_project_kernel_output_clip_max": "self_attn out_proj weight_quant _amax",
+        "encdec_project_kernel_q_clip_max": "encoder_attn q_proj weight_quant _amax",
+        "encdec_project_kernel_output_clip_max": "encoder_attn out_proj weight_quant _amax",
+        "ffn_first_kernel_clip_max": "fc1 weight_quant _amax",
+        "ffn_second_kernel_clip_max": "fc2 weight_quant _amax",
         # act_clip_max
         "self_ln_clip_max": "self_attn qkv_proj input_quant clip_value_max",
         "self_project_output_clip_max": "self_attn out_proj input_quant clip_value_max",
@@ -81,12 +81,12 @@ dec_layer_mapping_dict = OrderedDict(
         "encdec_project_output_clip_max": "encoder_attn out_proj input_quant clip_value_max",
         "ffn_ln_clip_max": "fc1 input_quant clip_value_max",
         "ffn_first_act_clip_max": "fc2 input_quant clip_value_max",
-        "self_qkv_dense_clip_max": "self_attn qkv_proj output_quant clip_value_max",
-        "self_output_dense_clip_max": "self_attn out_proj output_quant clip_value_max",
-        "encdec_q_dense_clip_max": "encoder_attn q_proj output_quant clip_value_max",
-        "encdec_output_dense_clip_max": "encoder_attn out_proj output_quant clip_value_max",
-        "ffn_first_output_clip_max": "fc1 output_quant clip_value_max",
-        "self_qkv_bias_out_clip_max": "self_attn attention_quant clip_value_max",
+        "self_qkv_dense_clip_max": "self_attn qkv_proj output_quant _amax",
+        "self_output_dense_clip_max": "self_attn out_proj output_quant _amax",
+        "encdec_q_dense_clip_max": "encoder_attn q_proj output_quant _amax",
+        "encdec_output_dense_clip_max": "encoder_attn out_proj output_quant _amax",
+        "ffn_first_output_clip_max": "fc1 output_quant _amax",
+        "self_qkv_bias_out_clip_max": "self_attn attention_quant _amax",
     }
 )
 
@@ -115,7 +115,7 @@ def _get_encode_output_mapping_dict(dec_layer_num):
         for ele in range(dec_layer_num)
     ]
     encode_output_kernel_clip_max_pattern = [
-        "encoder_attn {0} k_proj weight_quant clip_value_max".format(ele)
+        "encoder_attn {0} k_proj weight_quant _amax".format(ele)
         for ele in range(dec_layer_num)
     ]
     return {
@@ -127,7 +127,7 @@ def _get_encode_output_mapping_dict(dec_layer_num):
             encode_output_kernel_clip_max_pattern
         ),
         "output_ln_clip_max": "output_projection input_quant clip_value_max",
-        "logits_clip_max": "output_projection output_quant clip_value_max",
+        "logits_clip_max": "output_projection output_quant _amax",
     }
 
 
@@ -147,8 +147,10 @@ def fill_quant_pb_layer(tensor_names, state_dict, layer, mapping_dict):
 
 
 def export_ls_torch_fs_quant_transformer(
-    model_dir,
+    model_path,
     pb_path,
+    hdf5_path,
+    hdf5,
     max_step=300,
     bos_id=2,
     eos_id=2,
@@ -156,15 +158,15 @@ def export_ls_torch_fs_quant_transformer(
 ):
     transformer = QuantTransformer()
     # load var names
-    reloaded = torch.load(model_dir, "cpu")
+    reloaded = torch.load(model_path, "cpu")
     args = reloaded["args"]
     model_dict = reloaded["model"]
 
     var_names = list(model_dict.keys())
     for name in var_names:
-        if name.endswith("weight_quant.clip.clip_value_max"):
-            model_dict[name[:-26]] = torch.Tensor(
-                quantize(model_dict[name[:-26]].numpy(), 127, model_dict[name].numpy())
+        if name.endswith("weight_quant._amax"):
+            model_dict[name[:-12]] = torch.Tensor(
+                quantize(model_dict[name[:-12]].numpy(), 127, model_dict[name].numpy())
             ).int()
 
     trg_emb_mapping_dict["shared_bias"] = (
@@ -304,31 +306,20 @@ def export_ls_torch_fs_quant_transformer(
         save_pb=True,
     )
 
-    print("Writing to {0}".format(pb_path))
-    with tf.io.gfile.GFile(pb_path, "wb") as fout:
-        fout.write(transformer.SerializeToString())
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="export fairseq checkpoint", usage="")
-    parser.add_argument(
-        "--model",
-        "-m",
-        type=str,
-        default="checkpoint_best.pt",
-        help="path of fairseq checkpoint",
-    )
-    args = parser.parse_args()
-    return args
+    save_path = save_model(transformer, pb_path, hdf5_path, hdf5)
+    return save_path
 
 
 if __name__ == "__main__":
     args = parse_args()
     model_name = ".".join(args.model.split(".")[:-1])
     pb_path = f"{model_name}.pb"
-    export_ls_torch_fs_quant_transformer(args.model, pb_path)
+    hdf5_path = f"{model_name}.hdf5"
+    path = export_ls_torch_fs_quant_transformer(
+        args.model, pb_path, hdf5_path, args.hdf5
+    )
     src = [[63, 47, 65, 1507, 88, 74, 10, 2057, 362, 9, 284, 6, 2, 1, 1, 1]]
-    pb_model = lsi.QuantTransformer(pb_path, 8)
-    pb_output = pb_model.infer(src)
+    model = lsi.QuantTransformer(path, 8)
+    output = model.infer(src)
     # Expected result: [23, 550, 34, 118, 148, 2939, 4, 42, 32, 37, 6, 224, 10, 179, 5, 2]
-    print("pb results:", pb_output)
+    print("results:", output)
