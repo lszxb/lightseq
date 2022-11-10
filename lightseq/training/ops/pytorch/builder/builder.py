@@ -201,7 +201,38 @@ class OpBuilder(ABC):
         #     return importlib.import_module(self.absolute_name())
         # else:
         #     return self.jit_load(verbose)
-        return self.jit_load(verbose)
+        # return self.jit_load(verbose)
+
+        def load():
+            return self.jit_load(verbose)
+
+        from typing import Any
+        class _Lazy:
+            def __getattribute__(self, __name: str) -> Any:
+                try:
+                    inner = object.__getattribute__(self, '_inner')
+                except AttributeError:
+                    inner = load()
+                    object.__setattr__(self, '_inner', inner)
+                return getattr(inner, __name)
+
+            def __setattr__(self, __name: str, __value: Any) -> None:
+                try:
+                    inner = object.__getattribute__(self, '_inner')
+                except AttributeError:
+                    inner = load()
+                    object.__setattr__(self, '_inner', inner)
+                setattr(inner, __name, __value)
+
+            def __delattr__(self, __name: str) -> None:
+                try:
+                    inner = object.__getattribute__(self, '_inner')
+                except AttributeError:
+                    inner = load()
+                    object.__setattr__(self, '_inner', inner)
+                delattr(inner, __name)
+
+        return _Lazy()
 
     def jit_load(self, verbose=True):
         if not self.is_compatible():
