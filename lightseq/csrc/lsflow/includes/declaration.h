@@ -3,6 +3,7 @@
 #include "thread"
 #include <stdio.h>
 #include <fstream>
+#include <array>
 
 #include <cuda.h>
 #include <cuda_fp16.h>
