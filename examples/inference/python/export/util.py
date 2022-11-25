@@ -1,5 +1,4 @@
 import argparse
-import tensorflow as tf
 import h5py
 
 from export.proto.transformer_pb2 import Transformer
@@ -37,6 +36,7 @@ def parse_args():
 def save_model(transformer, pb_path, hdf5_path, hdf5):
     if not hdf5:
         try:
+            import tensorflow as tf
             str_model = transformer.SerializeToString()
             print("Writing to {0}".format(pb_path))
             with tf.io.gfile.GFile(pb_path, "wb") as fout:
