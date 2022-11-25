@@ -495,7 +495,8 @@ class LSTransformerDecoder(FairseqIncrementalDecoder):
             x = self.layer_norm(x)
 
         if not features_only:
-            x = self.output_projection(x)
+            x = x @ self.output_projection.weight.T
+            # x = self.output_projection(x)
         return x, None
 
     def max_positions(self):
